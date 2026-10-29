@@ -1,0 +1,5 @@
+# Normalise line endings on purpose: CRLF TypeScript makes Prettier's
+# `format:check` fail per machine, and this repository is configured for LF.
+* text=auto eol=lf
+*.png binary
+*.ico binary

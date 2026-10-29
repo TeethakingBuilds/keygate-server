@@ -1,0 +1,59 @@
+{
+  "name": "keygate-server",
+  "version": "0.1.0",
+  "description": "Off-chain authorization service for keygate: mirrors Soroban capability state and answers fast allow/deny decisions.",
+  "license": "Apache-2.0",
+  "packageManager": "pnpm@10.6.5",
+  "type": "module",
+  "sideEffects": false,
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "./dist/index.js",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/TeethakingBuilds/keygate-server.git"
+  },
+  "author": "keygate contributors",
+  "keywords": [
+    "stellar",
+    "soroban",
+    "access-control",
+    "authorization",
+    "capabilities"
+  ],
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  },
+  "scripts": {
+    "preinstall": "node scripts/only-pnpm.js",
+    "build": "tsc -p tsconfig.build.json",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "typecheck": "tsc --noEmit",
+    "check": "pnpm lint && pnpm format:check && pnpm typecheck && pnpm test"
+  },
+  "dependencies": {
+    "@stellar/stellar-sdk": "^13.3.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.18.0",
+    "@types/node": "^22.10.5",
+    "@vitest/coverage-v8": "^3.0.0",
+    "eslint": "^9.18.0",
+    "prettier": "^3.4.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3",
+    "typescript-eslint": "^8.20.0",
+    "vitest": "^3.0.0"
+  }
+}

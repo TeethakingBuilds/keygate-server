@@ -1,0 +1,57 @@
+name: Feature request
+description: A route, a signal, a decoding improvement, or a deployment shape
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This service is deliberately narrow: an in-memory projection of on-chain
+        state that answers decisions and fails closed. Persistence, clustering, a
+        shared budget counter, and a write path are all documented non-goals —
+        please read the "What this project will not add" section of
+        `CONTRIBUTING.md` before proposing one.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What you are trying to do
+      description: The operational job, not the mechanism.
+      placeholder: |
+        I want to know a decision was made from stale state, after the fact.
+    validations:
+      required: true
+  - type: textarea
+    id: today
+    attributes:
+      label: What you can do today, and where it stops
+      description: |
+        Which routes and fields you are already using (`/v1/status`,
+        `/readyz`, the denial reasons) and what is missing.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: The change you have in mind
+      description: |
+        Route, response shape, config key, or decoder branch. If it changes a
+        response, say whether the decision signature covers it.
+  - type: dropdown
+    id: failmode
+    attributes:
+      label: Which way does it fail?
+      description: |
+        The rule is that unknown means deny. Anything that introduces a new way
+        to answer `allowed: true` needs a very good reason.
+      options:
+        - It fails closed, like everything else here
+        - It only adds observability, no decision change
+        - It changes when an allow happens — I want to argue about it
+    validations:
+      required: true
+  - type: checkboxes
+    id: willing
+    attributes:
+      label: Willingness
+      options:
+        - label: I would like to implement this, and will start with an issue to agree the shape
+          required: false

@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a vulnerability
+    url: https://github.com/TeethakingBuilds/keygate-server/blob/main/SECURITY.md
+    about: Private advisory only — never a public issue or a pull request that shows the exploit.
+  - name: Support and where to ask
+    url: https://github.com/TeethakingBuilds/keygate-server/blob/main/SUPPORT.md
+    about: Which of the three repositories owns your question.

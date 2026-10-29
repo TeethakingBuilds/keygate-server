@@ -1,0 +1,105 @@
+name: Node
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: lint · typecheck · test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Enable pnpm from packageManager
+        uses: pnpm/action-setup@v4
+
+      - name: Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Format
+        run: pnpm format:check
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Test and coverage
+        # Thresholds in vitest.config.ts only bite when coverage is collected, so
+        # CI runs the coverage command rather than the bare `test` script.
+        run: pnpm exec vitest run --coverage
+
+      - name: Build
+        run: pnpm build
+
+      - name: Boot the service against an unreachable RPC
+        # The routes that matter must answer before the first sync completes, and
+        # answering is the point: `/readyz` is 503 and a decision is a denial, not
+        # a crash and not an allow. `.invalid` never resolves, and the URL is
+        # https because the RPC client refuses plaintext unless allowHttp is set.
+        env:
+          KEYGATE_SOROBAN_RPC_URL: https://keygate-ci.invalid/
+          KEYGATE_CORE_CONTRACT: CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526
+          KEYGATE_POLICY_CONTRACT: CABAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAFNSZ
+          KEYGATE_BREAKER_CONTRACT: CABQGAYDAMBQGAYDAMBQGAYDAMBQGAYDAMBQGAYDAMBQGAYDAMBQGCK3
+          KEYGATE_PORT: '8099'
+          KEYGATE_MAX_STALENESS_SECONDS: '1'
+        run: |
+          node dist/index.js &
+          server=$!
+          for attempt in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8099/healthz > /dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:8099/healthz
+          echo
+          ready_status=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8099/readyz)
+          if [ "$ready_status" != "503" ]; then
+            echo "expected /readyz to be 503 while unsynced, got $ready_status"
+            exit 1
+          fi
+          decision=$(curl -fsS -X POST http://127.0.0.1:8099/v1/decide \
+            -H 'content-type: application/json' \
+            -d '{"holder":"GAEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSH7S","resource":"vault:main","action":"withdraw"}')
+          echo "$decision"
+          case "$decision" in
+            *'"allowed":false'*'"reason":"state_unsynced"'*) ;;
+            *) echo "expected a fail-closed denial, got $decision"; exit 1 ;;
+          esac
+          kill "$server"
+
+      - name: Reject a bad configuration at boot
+        run: |
+          if KEYGATE_SOROBAN_RPC_URL=https://keygate-ci.invalid/ \
+             KEYGATE_CORE_CONTRACT=not-a-contract \
+             KEYGATE_POLICY_CONTRACT=CABAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAFNSZ \
+             KEYGATE_BREAKER_CONTRACT=CABQGAYDAMBQGAYDAMBQGAYDAMBQGAYDAMBQGAYDAMBQGAYDAMBQGCK3 \
+             node dist/index.js > /dev/null 2>&1
+          then
+            echo "the process started with an unusable contract id; it must fail at boot"
+            exit 1
+          fi
+
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage/
+          retention-days: 14

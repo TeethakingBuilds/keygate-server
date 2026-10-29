@@ -1,0 +1,83 @@
+name: Bug report
+description: A wrong decision, a mirror that will not sync, or a route that misbehaves
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Start with `GET /v1/status` and `GET /readyz` — most "it allowed something
+        it should not have" reports are really "the mirror had not seen the revoke
+        yet", which is documented behaviour rather than a bug. If this is a
+        security problem, do not file it here: use **Security → Report a
+        vulnerability**, see `SECURITY.md`.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: The decision or response you got, and the one you expected.
+      placeholder: |
+        `/v1/decide` returned `{"allowed":false,"reason":"capability_missing"}`
+        for a holder whose grant I can see on-chain.
+    validations:
+      required: true
+  - type: textarea
+    id: state
+    attributes:
+      label: What the service believed
+      description: 'Paste the JSON from `GET /v1/status` and `GET /readyz`.'
+      render: json
+      placeholder: |
+        { "ready": true, "liveGrants": 3, "stalenessSeconds": 4, "sync": { "cursor": "…", "lastError": null } }
+    validations:
+      required: true
+  - type: textarea
+    id: chain
+    attributes:
+      label: What the chain said
+      description: |
+        The contract addresses (`KEYGATE_*_CONTRACT`), the network, and the
+        transaction hash or ledger sequence of the event you expected to be
+        applied.
+    validations:
+      required: true
+  - type: textarea
+    id: request
+    attributes:
+      label: The request that produced it
+      description: The exact body, including whether `amount` was present.
+      render: json
+      placeholder: |
+        { "holder": "G…", "resource": "vault:main", "action": "withdraw", "amount": "500" }
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: From `package.json`, or the commit you ran.
+      placeholder: '0.1.0'
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which part
+      options:
+        - the decision engine (a reason, an allow that should be a deny)
+        - the ledger mirror or sync loop (events not applied, cursor, staleness)
+        - the HTTP layer (routing, body limits, headers, signing)
+        - configuration or startup
+        - the event decoder (an on-chain event mapped wrongly)
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before you submit
+      options:
+        - label: I searched open and closed issues for this
+          required: true
+        - label: I checked `stalenessSeconds` and `lastError` before deciding the mirror was correct
+          required: true
+        - label: I am not reporting a vulnerability here (those go to a private advisory)
+          required: true

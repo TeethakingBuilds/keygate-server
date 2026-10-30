@@ -126,6 +126,9 @@ export class DecisionEngine {
       return this.deny('budget_tripped', grant.id, now);
     }
     if (budget.used + request.amount > budget.limit) {
+      // Refusing here is the polite version of what the chain does: an attempt
+      // that crosses the limit latches the breaker as well, so if this request
+      // were forwarded the next one would be denied as `budget_tripped`.
       return this.deny('budget_exhausted', grant.id, now);
     }
 

@@ -15,6 +15,19 @@ const signingKey = z
   .string()
   .min(16, 'KEYGATE_SIGNING_KEY must be at least 16 bytes of secret material');
 
+/** Comma-separated bearer tokens. Each one is a credential, so short ones are refused. */
+const apiTokens = z
+  .string()
+  .transform((value) => value.split(','))
+  .pipe(
+    z.array(
+      z
+        .string()
+        .min(1, 'KEYGATE_API_TOKENS must not contain empty entries')
+        .min(32, 'KEYGATE_API_TOKENS entries must be at least 32 characters'),
+    ),
+  );
+
 export const ConfigSchema = z.object({
   port: z.coerce.number().int().min(1).max(65535).default(8080),
 
@@ -44,6 +57,9 @@ export const ConfigSchema = z.object({
   /** Shared secret used to HMAC responses; unset means responses are unsigned. */
   signingKey: signingKey.optional(),
 
+  /** Bearer tokens required on every `/v1/*` route; unset means the routes are open. */
+  apiTokens: apiTokens.optional(),
+
   logLevel: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
 });
 
@@ -69,6 +85,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     syncIntervalMs: env['KEYGATE_SYNC_INTERVAL_MS'],
     syncPageSize: env['KEYGATE_SYNC_PAGE_SIZE'],
     signingKey: env['KEYGATE_SIGNING_KEY'],
+    apiTokens: env['KEYGATE_API_TOKENS'],
     logLevel: env['KEYGATE_LOG_LEVEL'],
   });
 

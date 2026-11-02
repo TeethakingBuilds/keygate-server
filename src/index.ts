@@ -71,6 +71,7 @@ export async function main(
     logger,
     maxStalenessSeconds: config.maxStalenessSeconds,
     ...(config.signingKey === undefined ? {} : { signingKey: config.signingKey }),
+    ...(config.apiTokens === undefined ? {} : { apiTokens: config.apiTokens }),
   });
 
   await new Promise<void>((resolve, reject) => {

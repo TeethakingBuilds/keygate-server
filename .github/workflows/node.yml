@@ -50,6 +50,9 @@ jobs:
       - name: Build
         run: pnpm build
 
+      - name: Build container image
+        run: docker build --tag keygate-server:ci .
+
       - name: Boot the service against an unreachable RPC
         # The routes that matter must answer before the first sync completes, and
         # answering is the point: `/readyz` is 503 and a decision is a denial, not

@@ -24,6 +24,25 @@ cp .env.example .env                 # then edit the three contract ids
 pnpm dev                             # tsx watch, on KEYGATE_PORT
 ```
 
+### Running in a container
+
+Build and run the image with the required configuration supplied as environment
+variables. The image runs as a non-root user and does not contain `.env` files.
+
+```bash
+docker build -t keygate-server .
+docker run --rm \
+  -p 8080:8080 \
+  -e KEYGATE_SOROBAN_RPC_URL=https://your-rpc.example \
+  -e KEYGATE_CORE_CONTRACT=C... \
+  -e KEYGATE_POLICY_CONTRACT=C... \
+  -e KEYGATE_BREAKER_CONTRACT=C... \
+  keygate-server
+```
+
+Configure the orchestrator to use `/readyz` for readiness and `/healthz` for
+liveness. `/readyz` remains unavailable until the first ledger sync completes.
+
 ```bash
 curl -s localhost:8080/readyz
 # {"ready":true,"stalenessSeconds":4}

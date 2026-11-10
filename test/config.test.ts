@@ -94,3 +94,46 @@ describe('loadConfig rejection', () => {
     );
   });
 });
+
+describe('loadConfig API tokens', () => {
+  const TOKEN_A = 'a'.repeat(32);
+  const TOKEN_B = 'b'.repeat(40);
+
+  it('reads a comma-separated list of tokens', () => {
+    const config = loadConfig(baseEnv({ KEYGATE_API_TOKENS: `${TOKEN_A},${TOKEN_B}` }));
+
+    expect(config.apiTokens).toEqual([TOKEN_A, TOKEN_B]);
+  });
+
+  it('leaves the routes open when the variable is unset', () => {
+    expect(loadConfig(baseEnv()).apiTokens).toBeUndefined();
+  });
+
+  it('refuses an empty entry rather than silently dropping it', () => {
+    let caught: unknown;
+    try {
+      loadConfig(baseEnv({ KEYGATE_API_TOKENS: `${TOKEN_A},,${TOKEN_B}` }));
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(ConfigError);
+    expect((caught as ConfigError).issues).toContain(
+      'apiTokens.1: KEYGATE_API_TOKENS must not contain empty entries',
+    );
+  });
+
+  it('refuses a token shorter than 32 characters', () => {
+    let caught: unknown;
+    try {
+      loadConfig(baseEnv({ KEYGATE_API_TOKENS: `${TOKEN_A},hunter2` }));
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(ConfigError);
+    expect((caught as ConfigError).issues).toContain(
+      'apiTokens.1: KEYGATE_API_TOKENS entries must be at least 32 characters',
+    );
+  });
+});

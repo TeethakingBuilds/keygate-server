@@ -56,11 +56,13 @@ rough order of how much they have shaped the design:
    approved for the whole remainder and the contract's `enforce` is what decides
    the winner. Two instances of this service do not share a counter. Do not treat
    an allow with an amount as a reservation.
-5. **Nothing authenticates the caller.** There is no API key, no mTLS, no rate
-   limit — `GET /v1/capabilities/:holder` answers for any address, which means
-   anyone who can reach the port can enumerate who holds grants and when. The
-   process assumes it sits behind something that does not. Put it on a private
-   network or behind authentication before putting it on the internet.
+5. **Authentication is opt-in.** Set `KEYGATE_API_TOKENS` and every `/v1/*` route
+   requires a bearer token; `/healthz` and `/readyz` stay open. There is still no
+   mTLS and no rate limit. When the variable is unset, `GET /v1/capabilities/:holder`
+   answers for any address, so anyone who can reach the port can enumerate who
+   holds grants and when. The process assumes that deployment sits behind
+   something that authenticates. Put it on a private network or behind
+   authentication before putting it on the internet.
 6. **Absence is not proof, and only `ready` says so.** Until the first sync
    completes, the mirror knows nothing and every decision is `state_unsynced`;
    `/v1/capabilities/:holder` can answer `[]` while `stateReady` is false. A

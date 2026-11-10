@@ -140,6 +140,14 @@ is `KEYGATE_MAX_STALENESS_SECONDS` (default `120`): the point of a cache is spee
 and a stale cache is a security hole rather than an optimisation, so this is
 deliberately tight.
 
+`KEYGATE_API_TOKENS` (optional) is a comma-separated list of bearer tokens. When
+set, every `/v1/*` route requires `Authorization: Bearer <token>` and answers
+`401 {"error":"unauthorized"}` otherwise; `/healthz` and `/readyz` stay open so
+load balancers can probe them. Each token must be at least 32 characters, and
+empty entries are refused at boot. When unset, `/v1/*` is open, so put the
+service on a private network or behind a proxy in that case. Tokens are never
+logged.
+
 ## Design
 
 Directory by directory, and why each boundary is where it is:

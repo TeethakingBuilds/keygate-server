@@ -7,6 +7,7 @@
  * belongs in `keygate-client`, where the caller's key never leaves their own
  * process.
  */
+import { createHash, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { StrKey } from '@stellar/stellar-sdk';
 import { z } from 'zod';
@@ -45,6 +46,8 @@ export interface KeygateServerOptions {
   readonly clock: Clock;
   readonly sync?: StateSync;
   readonly signingKey?: string;
+  /** When non-empty, every `/v1/*` route requires one of these as a bearer token. */
+  readonly apiTokens?: readonly string[];
   readonly logger?: SyncLogger;
   readonly maxBodyBytes?: number;
   /** Decisions older than this are refused as `state_stale` even if fresh locally. */
@@ -109,6 +112,16 @@ async function route(
     };
   }
 
+  // Health routes stay open above: load balancers probe them without credentials.
+  const apiTokens = options.apiTokens ?? [];
+  if (apiTokens.length > 0 && path.startsWith('/v1/') && !isAuthorised(request, apiTokens)) {
+    return {
+      status: 401,
+      body: { error: 'unauthorized' },
+      headers: { 'www-authenticate': 'Bearer' },
+    };
+  }
+
   if (method === 'GET' && path === '/v1/status') {
     const snapshot = options.mirror.snapshot(options.clock.now());
     return {
@@ -159,6 +172,32 @@ async function route(
   }
 
   return { status: 404, body: { error: 'not_found' } };
+}
+
+/**
+ * Hashes both sides to a fixed length before `timingSafeEqual`, which requires
+ * equal lengths, so a short guess is not rejected any faster than a long one.
+ * Every configured token is compared even after a match, so timing does not
+ * reveal which token was presented.
+ */
+function isAuthorised(request: IncomingMessage, tokens: readonly string[]): boolean {
+  const header = request.headers.authorization ?? '';
+  const match = /^Bearer (.+)$/.exec(header);
+  if (match === null) {
+    return false;
+  }
+  const presented = sha256(match[1] ?? '');
+  let authorised = false;
+  for (const token of tokens) {
+    if (timingSafeEqual(presented, sha256(token))) {
+      authorised = true;
+    }
+  }
+  return authorised;
+}
+
+function sha256(value: string): Buffer {
+  return createHash('sha256').update(value).digest();
 }
 
 async function decide(

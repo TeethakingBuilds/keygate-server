@@ -35,6 +35,7 @@ function grant(overrides: Partial<Grant> = {}): Grant {
 interface ServeOptions {
   readonly synced?: boolean;
   readonly signingKey?: string;
+  readonly apiTokens?: readonly string[];
   readonly now?: number;
   readonly maxBodyBytes?: number;
   readonly withSync?: boolean;
@@ -92,6 +93,7 @@ async function serve(
     clock,
     maxStalenessSeconds: MAX_STALENESS,
     ...(options.signingKey === undefined ? {} : { signingKey: options.signingKey }),
+    ...(options.apiTokens === undefined ? {} : { apiTokens: options.apiTokens }),
     ...(options.maxBodyBytes === undefined ? {} : { maxBodyBytes: options.maxBodyBytes }),
     ...(sync === undefined ? {} : { sync }),
   });
@@ -356,6 +358,53 @@ describe('read-only projections', () => {
   it('reports no sync section when the server runs without one', async () => {
     await serve({}, async ({ base }) => {
       expect(decideBody(await (await fetch(`${base}/v1/status`)).json())['sync']).toBeNull();
+    });
+  });
+});
+
+describe('bearer token authentication', () => {
+  const TOKEN = 'k'.repeat(32);
+  const WRONG = 'w'.repeat(32);
+  const CAPABILITIES = `/v1/capabilities/${HOLDER}`;
+
+  it('rejects a /v1 request with no authorization header', async () => {
+    await serve({ apiTokens: [TOKEN] }, async ({ base }) => {
+      const response = await fetch(`${base}${CAPABILITIES}`);
+      expect(response.status).toBe(401);
+      expect(response.headers.get('www-authenticate')).toBe('Bearer');
+      expect(await response.json()).toEqual({ error: 'unauthorized' });
+    });
+  });
+
+  it('rejects a wrong token', async () => {
+    await serve({ apiTokens: [TOKEN] }, async ({ base }) => {
+      const response = await fetch(`${base}${CAPABILITIES}`, {
+        headers: { authorization: `Bearer ${WRONG}` },
+      });
+      expect(response.status).toBe(401);
+    });
+  });
+
+  it('accepts any configured token', async () => {
+    await serve({ apiTokens: [WRONG, TOKEN] }, async ({ base }) => {
+      const response = await fetch(`${base}${CAPABILITIES}`, {
+        headers: { authorization: `Bearer ${TOKEN}` },
+      });
+      expect(response.status).toBe(200);
+    });
+  });
+
+  it('keeps the health routes open without a token', async () => {
+    await serve({ apiTokens: [TOKEN] }, async ({ base }) => {
+      expect((await fetch(`${base}/healthz`)).status).toBe(200);
+      expect((await fetch(`${base}/readyz`)).status).toBe(200);
+    });
+  });
+
+  it('leaves /v1 open when no tokens are configured', async () => {
+    await serve({}, async ({ base }) => {
+      const response = await fetch(`${base}${CAPABILITIES}`);
+      expect(response.status).toBe(200);
     });
   });
 });

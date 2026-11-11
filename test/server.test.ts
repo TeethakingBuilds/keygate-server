@@ -1,7 +1,7 @@
 import { once } from 'node:events';
 import type { AddressInfo } from 'node:net';
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { StrKey } from '@stellar/stellar-sdk';
 
 import { FixedClock } from '../src/domain/clock.js';
@@ -9,7 +9,7 @@ import { DecisionEngine, type BudgetSummary, type Decision } from '../src/domain
 import { LedgerMirror } from '../src/domain/mirror.js';
 import type { Grant, Triple } from '../src/domain/types.js';
 import { createKeygateServer } from '../src/http/server.js';
-import { verifyDecision } from '../src/http/signing.js';
+import { signDecision, verifyDecision } from '../src/http/signing.js';
 import { StateSync, type EventRecord, type LedgerSource } from '../src/ledger/sync.js';
 
 const VAULT: Triple = { resource: 'vault:main', action: 'withdraw' };
@@ -39,6 +39,7 @@ interface ServeOptions {
   readonly now?: number;
   readonly maxBodyBytes?: number;
   readonly withSync?: boolean;
+  readonly engine?: DecisionEngine;
 }
 
 interface ServeHandle {
@@ -86,7 +87,8 @@ async function serve(
     options.withSync === true
       ? new StateSync(mirror, staticSource([pendingPage()]), clock)
       : undefined;
-  const engine = new DecisionEngine(mirror, { maxStalenessSeconds: MAX_STALENESS });
+  const engine =
+    options.engine ?? new DecisionEngine(mirror, { maxStalenessSeconds: MAX_STALENESS });
   const server = createKeygateServer({
     mirror,
     engine,
@@ -243,26 +245,85 @@ describe('POST /v1/decide', () => {
     });
   });
 
-  it('rejects a fractional amount rather than rounding it', async () => {
+  it.each([1.5, -1.5, '1.5', '-1.5'])('rejects fractional amount %s', async (amount) => {
     await serve({}, async ({ base }) => {
-      expect((await post(base, { ...request, amount: 1.5 })).status).toBe(400);
-      expect((await post(base, { ...request, amount: '1.5' })).status).toBe(400);
+      const response = await post(base, { ...request, amount });
+      expect(response.status).toBe(400);
+      expect(decideBody(await response.json())['error']).toBe('invalid_request');
     });
   });
 
-  it('accepts an amount beyond 2^53 only as a string', async () => {
+  it.each([Number.MAX_SAFE_INTEGER + 1, -Number.MAX_SAFE_INTEGER - 1])(
+    'rejects unsafe numeric amount %s',
+    async (amount) => {
+      await serve({}, async ({ base }) => {
+        const response = await post(base, { ...request, amount });
+        expect(response.status).toBe(400);
+        expect(decideBody(await response.json())['error']).toBe('invalid_request');
+      });
+    },
+  );
+
+  it('rejects a raw JSON integer that loses precision during parsing', async () => {
     await serve({}, async ({ base }) => {
-      // The registry has a budget, so a huge charge is refused for arithmetic
-      // reasons rather than dropped silently by a float conversion.
-      const response = await post(base, {
-        ...request,
-        amount: '340282366920938463463374607431768211455',
+      const raw = `${JSON.stringify(request).slice(0, -1)},"amount":9007199254740993}`;
+      const response = await post(base, raw);
+      expect(response.status).toBe(400);
+      expect(decideBody(await response.json())['error']).toBe('invalid_request');
+    });
+  });
+
+  it.each([Number.MAX_SAFE_INTEGER, -Number.MAX_SAFE_INTEGER, 0, -1])(
+    'passes safe numeric amount %s to the domain exactly',
+    async (amount) => {
+      const key = 'a-signing-secret-worth-at-least-16-bytes';
+      await serve({ signingKey: key }, async ({ base }) => {
+        const response = await post(base, { ...request, amount });
+        const decision: Decision = {
+          allowed: false,
+          reason: amount <= 0 ? 'amount_invalid' : 'budget_exhausted',
+          grantId: 7,
+          evaluatedAt: NOW,
+        };
+        expect(response.status).toBe(200);
+        expect(await response.json()).toEqual(decision);
+        expect(
+          verifyDecision(
+            key,
+            { holder: HOLDER, triple: VAULT, amount: BigInt(amount) },
+            decision,
+            response.headers.get('x-keygate-signature') ?? '',
+          ),
+        ).toBe(true);
       });
-      expect(response.status).toBe(200);
-      expect(decideBody(await response.json())).toMatchObject({
+    },
+  );
+
+  it.each([
+    '9007199254740993',
+    '-9007199254740993',
+    '340282366920938463463374607431768211455',
+    '-340282366920938463463374607431768211455',
+  ])('preserves large decimal string %s exactly', async (amount) => {
+    const key = 'a-signing-secret-worth-at-least-16-bytes';
+    await serve({ signingKey: key }, async ({ base }) => {
+      const response = await post(base, { ...request, amount });
+      const decision: Decision = {
         allowed: false,
-        reason: 'budget_exhausted',
-      });
+        reason: BigInt(amount) <= 0n ? 'amount_invalid' : 'budget_exhausted',
+        grantId: 7,
+        evaluatedAt: NOW,
+      };
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual(decision);
+      expect(
+        verifyDecision(
+          key,
+          { holder: HOLDER, triple: VAULT, amount: BigInt(amount) },
+          decision,
+          response.headers.get('x-keygate-signature') ?? '',
+        ),
+      ).toBe(true);
     });
   });
 
@@ -405,6 +466,184 @@ describe('bearer token authentication', () => {
     await serve({}, async ({ base }) => {
       const response = await fetch(`${base}${CAPABILITIES}`);
       expect(response.status).toBe(200);
+    });
+  });
+});
+
+describe('generated responses are uncacheable', () => {
+  const key = 'a-signing-secret-worth-at-least-16-bytes';
+  const request = { holder: HOLDER, resource: VAULT.resource, action: VAULT.action };
+  const post = (body: unknown): RequestInit => ({
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: typeof body === 'string' ? body : JSON.stringify(body),
+  });
+  const throwingEngine = new DecisionEngine(new LedgerMirror(), {
+    maxStalenessSeconds: MAX_STALENESS,
+  });
+  vi.spyOn(throwingEngine, 'decide').mockImplementation(() => {
+    throw new Error('unexpected engine failure');
+  });
+  const allowed: Decision = {
+    allowed: true,
+    reason: null,
+    grantId: 7,
+    expiresAt: 10_000,
+    budget: null,
+    evaluatedAt: NOW,
+  };
+  const denied: Decision = {
+    allowed: false,
+    reason: 'capability_missing',
+    grantId: null,
+    evaluatedAt: NOW,
+  };
+  const cases: {
+    name: string;
+    path: string;
+    status: number;
+    body: Record<string, unknown>;
+    options?: ServeOptions;
+    init?: RequestInit;
+    signature?: string;
+    authenticate?: string;
+  }[] = [
+    {
+      name: 'health',
+      path: '/healthz',
+      status: 200,
+      body: { status: 'ok' },
+      options: { synced: false },
+    },
+    {
+      name: 'ready',
+      path: '/readyz',
+      status: 200,
+      body: { ready: true, stalenessSeconds: NOW - EVENT_AT },
+    },
+    {
+      name: 'unready before sync',
+      path: '/readyz',
+      status: 503,
+      body: { ready: false, stalenessSeconds: null },
+      options: { synced: false },
+    },
+    {
+      name: 'unready when stale',
+      path: '/readyz',
+      status: 503,
+      body: { ready: false, stalenessSeconds: MAX_STALENESS + 1 },
+      options: { now: EVENT_AT + MAX_STALENESS + 1 },
+    },
+    {
+      name: 'status',
+      path: '/v1/status',
+      status: 200,
+      body: { ready: true, liveGrants: 1, budgets: 1, sync: null },
+    },
+    {
+      name: 'capabilities',
+      path: `/v1/capabilities/${HOLDER}`,
+      status: 200,
+      body: {
+        holder: HOLDER,
+        stateReady: true,
+        capabilities: [{ id: 7, ...VAULT, expiresAt: 10_000 }],
+      },
+    },
+    {
+      name: 'allowed decision',
+      path: '/v1/decide',
+      init: post(request),
+      status: 200,
+      body: { allowed: true, grantId: 7, expiresAt: 10_000, budget: null, evaluatedAt: NOW },
+      signature: signDecision(key, { holder: HOLDER, triple: VAULT }, allowed),
+    },
+    {
+      name: 'denied decision',
+      path: '/v1/decide',
+      init: post({ ...request, holder: OTHER }),
+      status: 200,
+      body: { ...denied },
+      signature: signDecision(key, { holder: OTHER, triple: VAULT }, denied),
+    },
+    {
+      name: 'invalid JSON',
+      path: '/v1/decide',
+      init: post('not JSON'),
+      status: 400,
+      body: { error: 'invalid_json' },
+    },
+    {
+      name: 'invalid request',
+      path: '/v1/decide',
+      init: post({ ...request, amount: 1.5 }),
+      status: 400,
+      body: { error: 'invalid_request' },
+    },
+    {
+      name: 'invalid holder',
+      path: '/v1/capabilities/not-an-address',
+      status: 400,
+      body: { error: 'invalid_holder' },
+    },
+    {
+      name: 'unauthorized',
+      path: '/v1/status',
+      status: 401,
+      body: { error: 'unauthorized' },
+      options: { apiTokens: ['k'.repeat(32)] },
+      authenticate: 'Bearer',
+    },
+    {
+      name: 'forbidden sync',
+      path: '/v1/sync',
+      init: post({}),
+      status: 403,
+      body: { error: 'write_path_not_offered' },
+    },
+    {
+      name: 'forbidden admin',
+      path: '/v1/admin/grant',
+      init: post({}),
+      status: 403,
+      body: { error: 'write_path_not_offered' },
+    },
+    {
+      name: 'not found',
+      path: '/v1/nope',
+      status: 404,
+      body: { error: 'not_found' },
+    },
+    {
+      name: 'oversized body',
+      path: '/v1/decide',
+      init: post(request),
+      status: 413,
+      body: { error: 'body_too_large' },
+      options: { maxBodyBytes: 64 },
+    },
+    {
+      name: 'unexpected engine failure',
+      path: '/v1/decide',
+      init: post(request),
+      status: 500,
+      body: { error: 'internal_error' },
+      options: { engine: throwingEngine },
+    },
+  ];
+
+  it.each(cases)('sets no-store for $name', async (testCase) => {
+    await serve({ ...testCase.options, signingKey: key }, async ({ base }) => {
+      const response = await fetch(`${base}${testCase.path}`, testCase.init);
+      expect(response.status).toBe(testCase.status);
+      expect(response.headers.get('cache-control')).toBe('no-store');
+      expect(response.headers.get('content-type')).toBe('application/json; charset=utf-8');
+      expect(response.headers.get('x-keygate-signature')).toBe(testCase.signature ?? null);
+      expect(response.headers.get('www-authenticate')).toBe(testCase.authenticate ?? null);
+      const payload = await response.text();
+      expect(response.headers.get('content-length')).toBe(String(Buffer.byteLength(payload)));
+      expect(JSON.parse(payload) as unknown).toMatchObject(testCase.body);
     });
   });
 });

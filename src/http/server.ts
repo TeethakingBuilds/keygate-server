@@ -37,7 +37,7 @@ const DecideBodySchema = z.object({
    * number beyond `Number.MAX_SAFE_INTEGER` would be silently wrong — the
    * string form is the one that should be used above 2^53.
    */
-  amount: z.union([z.string().regex(/^-?\d+$/), z.number().int()]).optional(),
+  amount: z.union([z.string().regex(/^-?\d+$/), z.number().int().safe()]).optional(),
 });
 
 export interface KeygateServerOptions {
@@ -242,7 +242,7 @@ async function decide(
   };
 
   const decision = options.engine.decide(decisionRequest, options.clock.now());
-  const headers: Record<string, string> = { 'cache-control': 'no-store' };
+  const headers: Record<string, string> = {};
   if (options.signingKey !== undefined) {
     headers['x-keygate-signature'] = signDecision(options.signingKey, decisionRequest, decision);
   }
@@ -318,6 +318,7 @@ function write(response: ServerResponse, result: HttpResult): void {
   response.writeHead(result.status, {
     'content-type': 'application/json; charset=utf-8',
     'content-length': Buffer.byteLength(payload),
+    'cache-control': 'no-store',
     ...result.headers,
   });
   response.end(payload);

@@ -54,6 +54,13 @@ export const ConfigSchema = z.object({
   /** Per-page event limit handed to Soroban RPC. */
   syncPageSize: z.coerce.number().int().min(1).max(200).default(100),
 
+  /**
+   * How long shutdown waits for in-flight requests to finish before
+   * force-closing their connections. A graceful stop is bounded: an operator
+   * who has to wait forever for a deploy has no deploy.
+   */
+  shutdownTimeoutMs: z.coerce.number().int().min(0).default(5_000),
+
   /** Shared secret used to HMAC responses; unset means responses are unsigned. */
   signingKey: signingKey.optional(),
 
@@ -84,6 +91,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     maxStalenessSeconds: env['KEYGATE_MAX_STALENESS_SECONDS'],
     syncIntervalMs: env['KEYGATE_SYNC_INTERVAL_MS'],
     syncPageSize: env['KEYGATE_SYNC_PAGE_SIZE'],
+    shutdownTimeoutMs: env['KEYGATE_SHUTDOWN_TIMEOUT_MS'],
     signingKey: env['KEYGATE_SIGNING_KEY'],
     apiTokens: env['KEYGATE_API_TOKENS'],
     logLevel: env['KEYGATE_LOG_LEVEL'],

@@ -156,6 +156,84 @@ describe('StateSync failure handling', () => {
   });
 });
 
+describe('StateSync shutdown', () => {
+  it('discards late results when stopped during a deferred poll', async () => {
+    const mirror = new LedgerMirror();
+    const clock = new FixedClock(1_000);
+    let release!: (records: EventRecord[]) => void;
+    const deferred = new Promise<EventRecord[]>((resolve) => {
+      release = resolve;
+    });
+    const source: LedgerSource = { fetch: () => deferred };
+    const sync = new StateSync(mirror, source, clock, noop);
+
+    const poll = sync.syncOnce();
+    // Let the fetch start before stopping.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    sync.stop();
+
+    // The answer arrives after the stop: it must not be applied, and the
+    // mirror must not gain freshness from it.
+    release([record('1-1', { kind: 'rule_set', triple: VAULT, effect: 'allow' })]);
+    expect(await poll).toBe(0);
+    expect(mirror.ruleFor(VAULT)).toBeUndefined();
+    expect(mirror.ready).toBe(false);
+    expect(sync.state.cursor).toBe('');
+    expect(sync.state.lastError).toBeUndefined();
+    expect(sync.state.errors).toBe(0);
+  });
+
+  it('does not start a new poll after it was stopped', async () => {
+    const mirror = new LedgerMirror();
+    let fetches = 0;
+    const source: LedgerSource = {
+      fetch: () => {
+        fetches += 1;
+        return Promise.resolve([]);
+      },
+    };
+    const sync = new StateSync(mirror, source, new FixedClock(1), noop);
+    sync.stop();
+    expect(await sync.syncOnce()).toBe(0);
+    expect(fetches).toBe(0);
+  });
+
+  it('counts failures but not aborts', async () => {
+    const mirror = new LedgerMirror();
+    const source = new FakeSource([[]]);
+    const sync = new StateSync(mirror, source, new FixedClock(1), noop);
+    source.failWith = new Error('rpc down');
+    await sync.syncOnce();
+    expect(sync.state.errors).toBe(1);
+    expect(sync.state.lastError).toBe('rpc down');
+    source.failWith = undefined;
+    await sync.syncOnce();
+    expect(sync.state.errors).toBe(1);
+    expect(sync.state.lastError).toBeUndefined();
+  });
+
+  it('restarts cleanly after a stop', async () => {
+    const mirror = new LedgerMirror();
+    // Cursor-based, so a poll aborted mid-flight can be re-fetched from the
+    // same cursor instead of losing the page it discarded.
+    const source: LedgerSource = {
+      fetch: (cursor: string) =>
+        Promise.resolve(
+          cursor === ''
+            ? [record('1-1', { kind: 'rule_set', triple: VAULT, effect: 'allow' })]
+            : [],
+        ),
+    };
+    const sync = new StateSync(mirror, source, new FixedClock(1), noop);
+    sync.start(1_000);
+    sync.stop();
+    sync.start(1_000);
+    await sync.syncOnce();
+    expect(mirror.ruleFor(VAULT)).toBe('allow');
+    sync.stop();
+  });
+});
+
 describe('StateSync loop control', () => {
   it('polls repeatedly until stopped', async () => {
     const mirror = new LedgerMirror();

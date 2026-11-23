@@ -57,12 +57,15 @@ rough order of how much they have shaped the design:
    the winner. Two instances of this service do not share a counter. Do not treat
    an allow with an amount as a reservation.
 5. **Authentication is opt-in.** Set `KEYGATE_API_TOKENS` and every `/v1/*` route
-   requires a bearer token; `/healthz` and `/readyz` stay open. There is still no
+   requires a bearer token; `/healthz`, `/readyz` and `/metrics` stay open. There is still no
    mTLS and no rate limit. When the variable is unset, `GET /v1/capabilities/:holder`
    answers for any address, so anyone who can reach the port can enumerate who
    holds grants and when. The process assumes that deployment sits behind
    something that authenticates. Put it on a private network or behind
-   authentication before putting it on the internet.
+   authentication before putting it on the internet. The TLS recipe, including
+   loopback-only publishing, is in [docs/reverse-proxy.md](./docs/reverse-proxy.md).
+   `/metrics` is open by design and carries counts and gauges only — no holder
+   addresses and no resource names — so there is nothing in it to enumerate.
 6. **Absence is not proof, and only `ready` says so.** Until the first sync
    completes, the mirror knows nothing and every decision is `state_unsynced`;
    `/v1/capabilities/:holder` can answer `[]` while `stateReady` is false. A
@@ -103,6 +106,9 @@ rough order of how much they have shaped the design:
 - `KEYGATE_SIGNING_KEY` set (`openssl rand -hex 32`), stored as a secret, never
   committed, and known to as few services as possible.
 - The port bound to a private interface or a reverse proxy that authenticates.
+  See [docs/reverse-proxy.md](./docs/reverse-proxy.md): publish the backend on
+  loopback only, terminate TLS in the proxy, and remember that bearer tokens,
+  TLS and signed decisions protect three different links.
 - `GET /readyz` wired to the load balancer, so an unsynced instance takes no
   traffic.
 - Log shipping treated as sensitive: `request` lines carry the URL, which for

@@ -39,6 +39,8 @@ interface ServeOptions {
   readonly now?: number;
   readonly maxBodyBytes?: number;
   readonly withSync?: boolean;
+  /** Ledger source for the sync loop; a one-page stub when omitted. */
+  readonly source?: LedgerSource;
   readonly engine?: DecisionEngine;
 }
 
@@ -46,6 +48,7 @@ interface ServeHandle {
   readonly base: string;
   readonly mirror: LedgerMirror;
   readonly sync: StateSync | undefined;
+  readonly clock: FixedClock;
 }
 
 /** A stub source: one page of the mirrored history, then nothing. */
@@ -85,7 +88,7 @@ async function serve(
 
   const sync =
     options.withSync === true
-      ? new StateSync(mirror, staticSource([pendingPage()]), clock)
+      ? new StateSync(mirror, options.source ?? staticSource([pendingPage()]), clock)
       : undefined;
   const engine =
     options.engine ?? new DecisionEngine(mirror, { maxStalenessSeconds: MAX_STALENESS });
@@ -104,7 +107,7 @@ async function serve(
   await once(server, 'listening');
   const { port } = server.address() as AddressInfo;
   try {
-    await fn({ base: `http://127.0.0.1:${port}`, mirror, sync });
+    await fn({ base: `http://127.0.0.1:${port}`, mirror, sync, clock });
   } finally {
     server.close();
     await once(server, 'close');
@@ -419,6 +422,170 @@ describe('read-only projections', () => {
   it('reports no sync section when the server runs without one', async () => {
     await serve({}, async ({ base }) => {
       expect(decideBody(await (await fetch(`${base}/v1/status`)).json())['sync']).toBeNull();
+    });
+  });
+});
+
+/** Lines of a `/metrics` body for one series, in exposition order. */
+function metricLines(body: string, name: string): string[] {
+  return body.split('\n').filter((line) => line.startsWith(name));
+}
+
+describe('GET /metrics', () => {
+  it('reports decision outcomes, mirror gauges and request counts', async () => {
+    await serve({}, async ({ base }) => {
+      const decide = (holder: string): Promise<Response> =>
+        fetch(`${base}/v1/decide`, {
+          method: 'POST',
+          body: JSON.stringify({
+            holder,
+            resource: VAULT.resource,
+            action: VAULT.action,
+          }),
+          headers: { 'content-type': 'application/json' },
+        });
+      await decide(HOLDER);
+      await decide(HOLDER);
+      await decide(OTHER);
+
+      const response = await fetch(`${base}/metrics`);
+      expect(response.status).toBe(200);
+      expect(response.headers.get('content-type')).toBe('text/plain; version=0.0.4; charset=utf-8');
+      expect(response.headers.get('cache-control')).toBe('no-store');
+      const body = await response.text();
+      expect(metricLines(body, 'keygate_decisions_total{allowed="true",reason="none"}')).toEqual([
+        'keygate_decisions_total{allowed="true",reason="none"} 2',
+      ]);
+      expect(
+        metricLines(body, 'keygate_decisions_total{allowed="false",reason="capability_missing"}'),
+      ).toEqual(['keygate_decisions_total{allowed="false",reason="capability_missing"} 1']);
+      expect(metricLines(body, 'keygate_mirror_ready')).toEqual(['keygate_mirror_ready 1']);
+      expect(metricLines(body, 'keygate_mirror_staleness_seconds')).toEqual([
+        `keygate_mirror_staleness_seconds ${NOW - EVENT_AT}`,
+      ]);
+      expect(metricLines(body, 'keygate_mirror_grants')).toEqual(['keygate_mirror_grants 1']);
+      expect(metricLines(body, 'keygate_mirror_rules')).toEqual(['keygate_mirror_rules 1']);
+      expect(metricLines(body, 'keygate_mirror_budgets')).toEqual(['keygate_mirror_budgets 1']);
+      expect(
+        metricLines(body, 'keygate_http_requests_total{route="/v1/decide",status="200"}'),
+      ).toEqual(['keygate_http_requests_total{route="/v1/decide",status="200"} 3']);
+      // No sync loop, so no sync series.
+      expect(metricLines(body, 'keygate_sync_')).toEqual([]);
+      // No holder address or resource name anywhere in the exposition.
+      expect(body).not.toContain(HOLDER);
+      expect(body).not.toContain(VAULT.resource);
+    });
+  });
+
+  it('stays open when bearer tokens are configured', async () => {
+    await serve({ apiTokens: ['k'.repeat(32)] }, async ({ base }) => {
+      const response = await fetch(`${base}/metrics`);
+      expect(response.status).toBe(200);
+      expect((await response.text()).split('\n')[0]).toBe(
+        '# HELP keygate_decisions_total Decisions answered by the engine.',
+      );
+    });
+  });
+
+  it('omits the staleness gauge before any observation', async () => {
+    await serve({ synced: false }, async ({ base }) => {
+      const body = await (await fetch(`${base}/metrics`)).text();
+      expect(metricLines(body, 'keygate_mirror_staleness_seconds')).toEqual([]);
+      expect(metricLines(body, 'keygate_mirror_ready')).toEqual(['keygate_mirror_ready 0']);
+    });
+  });
+
+  it('exposes the sync cursor, last success and error count', async () => {
+    await serve({ withSync: true }, async ({ base, sync }) => {
+      await sync?.syncOnce();
+      const body = await (await fetch(`${base}/metrics`)).text();
+      expect(metricLines(body, 'keygate_sync_last_success_timestamp_seconds')).toEqual([
+        `keygate_sync_last_success_timestamp_seconds ${NOW}`,
+      ]);
+      expect(metricLines(body, 'keygate_sync_errors_total')).toEqual([
+        'keygate_sync_errors_total 0',
+      ]);
+    });
+  });
+});
+
+describe('readiness and diagnostics through RPC failure and recovery', () => {
+  /** Source whose behaviour the test drives step by step. */
+  class ScriptedSource implements LedgerSource {
+    private mode: 'page' | 'fail' | 'empty' = 'page';
+    private sent = false;
+
+    constructor(private readonly page: EventRecord) {}
+
+    setMode(mode: 'page' | 'fail' | 'empty'): void {
+      this.mode = mode;
+    }
+
+    fetch(): Promise<EventRecord[]> {
+      if (this.mode === 'fail') {
+        return Promise.reject(new Error('rpc down'));
+      }
+      if (this.mode === 'empty') {
+        return Promise.resolve([]);
+      }
+      // One page, then nothing: the drain loop pages until it sees an empty
+      // page, so returning the page forever would never terminate.
+      if (this.sent) {
+        return Promise.resolve([]);
+      }
+      this.sent = true;
+      return Promise.resolve([this.page]);
+    }
+  }
+
+  it('follows failure, staleness and recovery through the HTTP surface', async () => {
+    const source = new ScriptedSource(pendingPage());
+    await serve({ withSync: true, source }, async ({ base, sync, clock }) => {
+      const status = async (): Promise<Record<string, unknown>> =>
+        decideBody(await (await fetch(`${base}/v1/status`)).json());
+      const metrics = async (): Promise<string> => (await fetch(`${base}/metrics`)).text();
+
+      // A successful poll exposes its cursor and a null error.
+      expect(await sync?.syncOnce()).toBe(1);
+      expect(await status()).toMatchObject({
+        ready: true,
+        sync: { cursor: '42-1', lastError: null },
+      });
+      expect((await metrics()).split('\n')).toContain('keygate_sync_errors_total 0');
+
+      // A failed poll exposes the error while the cursor and the projection it
+      // built stay exactly where they were.
+      source.setMode('fail');
+      expect(await sync?.syncOnce()).toBe(0);
+      expect(await status()).toMatchObject({
+        liveGrants: 1,
+        sync: { cursor: '42-1', lastError: 'rpc down' },
+      });
+      expect((await metrics()).split('\n')).toContain('keygate_sync_errors_total 1');
+
+      // Past the staleness limit the service fails closed but stays up.
+      clock.advance(MAX_STALENESS + 1);
+      expect((await fetch(`${base}/readyz`)).status).toBe(503);
+      expect((await fetch(`${base}/healthz`)).status).toBe(200);
+      const denied = await fetch(`${base}/v1/decide`, {
+        method: 'POST',
+        body: JSON.stringify({
+          holder: HOLDER,
+          resource: VAULT.resource,
+          action: VAULT.action,
+        }),
+        headers: { 'content-type': 'application/json' },
+      });
+      expect(decideBody(await denied.json())).toMatchObject({
+        allowed: false,
+        reason: 'state_stale',
+      });
+
+      // A successful empty poll clears the error and restores readiness.
+      source.setMode('empty');
+      expect(await sync?.syncOnce()).toBe(0);
+      expect(await status()).toMatchObject({ sync: { cursor: '42-1', lastError: null } });
+      expect((await fetch(`${base}/readyz`)).status).toBe(200);
     });
   });
 });

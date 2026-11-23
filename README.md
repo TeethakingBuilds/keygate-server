@@ -32,7 +32,7 @@ variables. The image runs as a non-root user and does not contain `.env` files.
 ```bash
 docker build -t keygate-server .
 docker run --rm \
-  -p 8080:8080 \
+  -p 127.0.0.1:8080:8080 \
   -e KEYGATE_SOROBAN_RPC_URL=https://your-rpc.example \
   -e KEYGATE_CORE_CONTRACT=C... \
   -e KEYGATE_POLICY_CONTRACT=C... \
@@ -71,6 +71,7 @@ request for an outage).
 | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `GET /healthz`                 | process is up; `{"status":"ok"}`. Never consults the mirror.                                                                                                                          |
 | `GET /readyz`                  | `200` when the mirror is synced **and** within `KEYGATE_MAX_STALENESS_SECONDS`; otherwise `503` with `stalenessSeconds`. This is the endpoint a load balancer should watch.           |
+| `GET /metrics`                 | Prometheus text format: decision outcomes, mirror gauges, sync health and per-route request counts. Unauthenticated by design — counts and gauges only, no holder or resource labels. |
 | `GET /v1/status`               | what the mirror currently believes: grant/rule/budget counts, default effect, pause flag, sync cursor and last error.                                                                 |
 | `GET /v1/capabilities/:holder` | the live grants for one address, plus `stateReady`.                                                                                                                                   |
 | `POST /v1/decide`              | the decision, described below.                                                                                                                                                        |
@@ -199,7 +200,8 @@ thresholds (80% lines and functions, 75% branches) are enforced by
 ## Status and scope
 
 Version 0.1.0, **unaudited**. It is a single-process, in-memory projection: there
-is no persistence, no clustering and no metrics exporter. Read
+is no persistence and no clustering. `GET /metrics` exposes Prometheus counters
+and gauges for decisions, mirror freshness and sync health. Read
 [SECURITY.md](./SECURITY.md) before pointing it at real value, and
 [CONTRIBUTING.md](./CONTRIBUTING.md) before changing the wire format of a
 decision.
@@ -208,6 +210,7 @@ decision.
 
 - [CONTRIBUTING.md](./CONTRIBUTING.md) — setup, style, how to change a response shape
 - [SECURITY.md](./SECURITY.md) — reporting and the trust boundaries of a cache
+- [docs/reverse-proxy.md](./docs/reverse-proxy.md) — TLS termination, loopback-only publishing, and what bearer tokens, TLS and signed decisions each protect
 - [SUPPORT.md](./SUPPORT.md) — where to ask questions
 - [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md)
 

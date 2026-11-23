@@ -42,6 +42,8 @@ export interface SyncState {
   readonly applied: number;
   readonly lastSuccessAt: Timestamp | undefined;
   readonly lastError: string | undefined;
+  /** Failed polls since process start. Aborted polls do not count. */
+  readonly errors: number;
   readonly running: boolean;
 }
 
@@ -50,9 +52,16 @@ export class StateSync {
   private applied = 0;
   private lastSuccessAt: Timestamp | undefined;
   private lastError: string | undefined;
+  private errors = 0;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private inFlight: Promise<number> | undefined;
   private running = false;
+  /**
+   * Aborted by `stop()`. The signal is passed into every poll, so a poll that
+   * is already waiting on the network can be told to throw its answer away
+   * instead of applying it after the loop has stopped.
+   */
+  private abort = new AbortController();
 
   constructor(
     private readonly mirror: LedgerMirror,
@@ -67,6 +76,7 @@ export class StateSync {
       applied: this.applied,
       lastSuccessAt: this.lastSuccessAt,
       lastError: this.lastError,
+      errors: this.errors,
       running: this.running,
     };
   }
@@ -79,8 +89,19 @@ export class StateSync {
     if (this.inFlight) {
       return this.inFlight;
     }
-    const attempt = this.drain(signal).finally(() => {
-      this.inFlight = undefined;
+    // A caller may bring its own signal (a test, or a shutdown); either way a
+    // stop aborts the poll too.
+    const effective =
+      signal === undefined ? this.abort.signal : AbortSignal.any([this.abort.signal, signal]);
+    if (effective.aborted) {
+      return Promise.resolve(0);
+    }
+    const attempt = this.drain(effective).finally(() => {
+      // A stop clears `inFlight` so a restarted loop can poll again; the old
+      // attempt must not wipe the new poll's entry when it settles.
+      if (this.inFlight === attempt) {
+        this.inFlight = undefined;
+      }
     });
     this.inFlight = attempt;
     return attempt;
@@ -95,7 +116,16 @@ export class StateSync {
     let applied = 0;
     try {
       for (;;) {
+        if (aborted(signal)) {
+          return applied;
+        }
         const page = await this.source.fetch(this.cursor, signal);
+        // The fetch may have resolved after the loop was stopped. Its records
+        // are late: applying them would advance mirror freshness after the
+        // operator asked the loop to stop, so they are discarded instead.
+        if (aborted(signal)) {
+          return applied;
+        }
         // Marked before the records are applied: an empty page still proves the
         // mirror is current, and that is what keeps an idle registry answerable.
         this.mirror.markObserved(this.clock.now());
@@ -116,7 +146,13 @@ export class StateSync {
       }
       return applied;
     } catch (error) {
+      // An aborted poll is not a failure: the operator asked it to stop, and
+      // recording it as an RPC error would page someone for a shutdown.
+      if (aborted(signal)) {
+        return applied;
+      }
       this.lastError = describe(error);
+      this.errors += 1;
       this.logger.warn('sync failed', { error: this.lastError, cursor: this.cursor });
       return applied;
     }
@@ -126,6 +162,10 @@ export class StateSync {
   start(intervalMs: number): void {
     if (this.running) {
       return;
+    }
+    // A previous stop aborted the controller; a restarted loop needs a live one.
+    if (this.abort.signal.aborted) {
+      this.abort = new AbortController();
     }
     this.running = true;
     const tick = (): void => {
@@ -144,6 +184,12 @@ export class StateSync {
 
   stop(): void {
     this.running = false;
+    // Aborts any poll in flight: the drain checks the signal after its fetch
+    // resolves and discards the late answer rather than applying it. The
+    // in-flight entry is cleared too, so a restarted loop starts a fresh poll
+    // instead of sharing the dead one.
+    this.abort.abort();
+    this.inFlight = undefined;
     if (this.timer !== undefined) {
       clearTimeout(this.timer);
       this.timer = undefined;
@@ -153,4 +199,13 @@ export class StateSync {
 
 function describe(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * A helper rather than an inline check: `signal.aborted` can flip between two
+ * reads (the abort happens on another stack), and an inline comparison after
+ * an earlier one reads to the compiler as dead code.
+ */
+function aborted(signal: AbortSignal | undefined): boolean {
+  return signal?.aborted === true;
 }

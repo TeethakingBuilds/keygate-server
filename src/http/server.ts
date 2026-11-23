@@ -16,6 +16,7 @@ import type { Clock } from '../domain/clock.js';
 import { type DecisionEngine, type Decision, type DecisionRequest } from '../domain/decide.js';
 import type { LedgerMirror, MirrorSnapshot } from '../domain/mirror.js';
 import { silentLogger, type StateSync, type SyncLogger } from '../ledger/sync.js';
+import { Metrics } from './metrics.js';
 import { signDecision } from './signing.js';
 
 const DEFAULT_MAX_BODY_BYTES = 64 * 1024;
@@ -52,6 +53,8 @@ export interface KeygateServerOptions {
   readonly maxBodyBytes?: number;
   /** Decisions older than this are refused as `state_stale` even if fresh locally. */
   readonly maxStalenessSeconds: number;
+  /** Counters and gauges for `GET /metrics`. Created when omitted. */
+  readonly metrics?: Metrics;
 }
 
 interface HttpResult {
@@ -63,12 +66,15 @@ interface HttpResult {
 export function createKeygateServer(options: KeygateServerOptions): Server {
   const logger = options.logger ?? silentLogger;
   const maxBodyBytes = options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
+  const metrics = options.metrics ?? new Metrics();
 
   const handler = async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
     const started = process.hrtime.bigint();
+    const template = routeTemplate(request);
     try {
-      const result = await route(request, options, maxBodyBytes);
+      const result = await route(request, options, maxBodyBytes, metrics);
       write(response, result);
+      metrics.httpRequest(template, result.status);
       const ms = Number(process.hrtime.bigint() - started) / 1e6;
       logger.info('request', {
         method: request.method,
@@ -79,6 +85,7 @@ export function createKeygateServer(options: KeygateServerOptions): Server {
     } catch (error) {
       // One catch-all: an unexpected throw must not print a stack to a client,
       // and must not leave the socket hanging.
+      metrics.httpRequest(template, 500);
       logger.warn('request failed', { error: describe(error), url: request.url });
       write(response, { status: 500, body: { error: 'internal_error' } });
     }
@@ -89,10 +96,32 @@ export function createKeygateServer(options: KeygateServerOptions): Server {
   });
 }
 
+/**
+ * The route template for a request, for the `keygate_http_requests_total`
+ * label. Templates, never raw paths: a path that carries a holder address
+ * would make the label unbounded and leak who accessed what.
+ */
+function routeTemplate(request: IncomingMessage): string {
+  const url = new URL(request.url ?? '/', `http://${request.headers.host ?? 'localhost'}`);
+  const path = url.pathname.replace(/\/+$/, '') || '/';
+  const method = request.method ?? 'GET';
+
+  if (method === 'GET' && path === '/healthz') return '/healthz';
+  if (method === 'GET' && path === '/readyz') return '/readyz';
+  if (method === 'GET' && path === '/metrics') return '/metrics';
+  if (method === 'GET' && path === '/v1/status') return '/v1/status';
+  if (method === 'GET' && path.startsWith('/v1/capabilities/')) return '/v1/capabilities/:holder';
+  if (method === 'POST' && path === '/v1/decide') return '/v1/decide';
+  if (method === 'POST' && path === '/v1/sync') return '/v1/sync';
+  if (method === 'POST' && path.startsWith('/v1/admin')) return '/v1/admin';
+  return 'other';
+}
+
 async function route(
   request: IncomingMessage,
   options: KeygateServerOptions,
   maxBodyBytes: number,
+  metrics: Metrics,
 ): Promise<HttpResult> {
   const url = new URL(request.url ?? '/', `http://${request.headers.host ?? 'localhost'}`);
   const path = url.pathname.replace(/\/+$/, '') || '/';
@@ -109,6 +138,21 @@ async function route(
     return {
       status: ready ? 200 : 503,
       body: { ready, stalenessSeconds: staleness ?? null },
+    };
+  }
+
+  // Open like the health routes: the exporter carries counts and gauges only —
+  // no holder addresses, no resource names — so there is nothing here to
+  // authenticate, and a scraper cannot be expected to hold a bearer token.
+  if (method === 'GET' && path === '/metrics') {
+    return {
+      status: 200,
+      body: metrics.render({
+        mirror: options.mirror,
+        clock: options.clock,
+        ...(options.sync === undefined ? {} : { syncState: options.sync.state }),
+      }),
+      headers: { 'content-type': 'text/plain; version=0.0.4; charset=utf-8' },
     };
   }
 
@@ -164,7 +208,7 @@ async function route(
   }
 
   if (method === 'POST' && path === '/v1/decide') {
-    return decide(request, options, maxBodyBytes);
+    return decide(request, options, maxBodyBytes, metrics);
   }
 
   if (method === 'POST' && (path === '/v1/sync' || path.startsWith('/v1/admin'))) {
@@ -204,6 +248,7 @@ async function decide(
   request: IncomingMessage,
   options: KeygateServerOptions,
   maxBodyBytes: number,
+  metrics: Metrics,
 ): Promise<HttpResult> {
   const raw = await readBody(request, maxBodyBytes);
   if (raw === null) {
@@ -242,6 +287,7 @@ async function decide(
   };
 
   const decision = options.engine.decide(decisionRequest, options.clock.now());
+  metrics.decision(decision.allowed, decision.allowed ? null : decision.reason);
   const headers: Record<string, string> = {};
   if (options.signingKey !== undefined) {
     headers['x-keygate-signature'] = signDecision(options.signingKey, decisionRequest, decision);
@@ -314,7 +360,9 @@ function readBody(request: IncomingMessage, maxBytes: number): Promise<string | 
 }
 
 function write(response: ServerResponse, result: HttpResult): void {
-  const payload = JSON.stringify(result.body);
+  // A string body is already rendered (the `/metrics` text format); everything
+  // else is a JSON object.
+  const payload = typeof result.body === 'string' ? result.body : JSON.stringify(result.body);
   response.writeHead(result.status, {
     'content-type': 'application/json; charset=utf-8',
     'content-length': Buffer.byteLength(payload),
